@@ -1,191 +1,176 @@
 #include "config.h"
 #include "common.h"
 
-#define MAX_EVENT           (128) 
-#define MAX_BUFSIZE         (512)   
+int epoll_fd;
+int socket_fd;
+int listen_fd_init;
+socklen_t clilen ;
+struct sockaddr_in clientaddr,serveraddr;
+struct epoll_event ev;
+struct epoll_event events[MAX_EVENT];
 
-int setNonBlocking(int p_nSock)
+static int tcp_init();
+static int add_init_epoll();
+static void epoll_loop();
+
+int main()
+{
+	tcp_init();
+	add_init_epoll();
+	epoll_loop();
+}
+
+int set_nonblocking(int p_nsock)
 {   
-    int nOpts;   
-    nOpts=fcntl(p_nSock,F_GETFL);   
-    if(nOpts<0)   
+    int nopts;   
+    nopts=fcntl(p_nsock,F_GETFL);   
+    if(nopts<0)   
     {   
         printf("[%s %d] Fcntl Sock GETFL fail!\n",__FUNCTION__,__LINE__);
         return -1;
     }   
 
-    nOpts = nOpts|O_NONBLOCK;   
-    if(fcntl(p_nSock,F_SETFL,nOpts)<0)   
+    nopts = nopts|O_NONBLOCK;   
+    if(fcntl(p_nsock,F_SETFL,nopts)<0)   
     {  
         printf("[%s %d] Fcntl Sock SETFL fail!\n",__FUNCTION__,__LINE__);
         return -1;   
     } 
 
     return 0;
-}   
+} 
 
-int main()
+int tcp_init()
 {
-    int nRet,i;
-    int nSockfd;
-    int nAcceptfd;
-    int nEventNum;   
-    int nEpollfd;
-    int nListenfd;
-
-    struct sockaddr_in clientaddr;     
-    struct sockaddr_in serveraddr;
-    socklen_t clilen = sizeof(struct sockaddr_in);
-
-    struct epoll_event ev;
-    struct epoll_event events[MAX_EVENT];
-
-    nEpollfd=epoll_create(MAX_EVENT);
-    if (nEpollfd <= 0)
+    clilen = sizeof(struct sockaddr_in);
+    epoll_fd=epoll_create(MAX_EVENT);
+    if (epoll_fd <= 0)
     {
-        printf("[%s %d] Epoll Create fail return:%d!\n",__FUNCTION__,__LINE__,nEpollfd);
+        printf("[%s %d] Epoll Create fail return:%d!\n",__FUNCTION__,__LINE__,epoll_fd);
         return 0;
-    }
-
-    nListenfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (nListenfd < 0)
+	}
+    listen_fd_init = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd_init < 0)
     {
-        printf("[%s %d] Socket Create fail return:%d!\n",__FUNCTION__,__LINE__,nListenfd);
+        printf("[%s %d] Socket Create fail return:%d!\n",__FUNCTION__,__LINE__,listen_fd_init);
         return 0;
-    }
-
-    if (setNonBlocking(nListenfd) < 0)
+	}
+    if (set_nonblocking(listen_fd_init) < 0)
     {
         return 0;
     }
-
     memset(&serveraddr, 0x00, sizeof(serveraddr));
     serveraddr.sin_family = AF_INET;   
     serveraddr.sin_addr.s_addr=inet_addr("127.0.0.1");   
     serveraddr.sin_port=htons(SERV_PORT);   
-
-    if (bind(nListenfd,(struct sockaddr *)&serveraddr, sizeof(serveraddr)) < 0)
+    if (bind(listen_fd_init,(struct sockaddr *)&serveraddr, sizeof(serveraddr)) < 0)
     {
         printf("[%s %d] Bind fd fail!\n",__FUNCTION__,__LINE__);
         return 0;
     }
 
-    if (listen(nListenfd,MAX_LISTENQ) < 0)
+    if (listen(listen_fd_init,MAX_LISTENQ) < 0)
     {
         printf("[%s %d] Listen fd fail!\n",__FUNCTION__,__LINE__);
         return 0;
     } 
+} 
 
-    ev.data.fd=nListenfd;        
+int add_init_epoll()
+{
+    ev.data.fd=listen_fd_init;        
     ev.events=EPOLLIN;
-    if (epoll_ctl(nEpollfd,EPOLL_CTL_ADD,nListenfd,&ev) < 0)
+    if (epoll_ctl(epoll_fd,EPOLL_CTL_ADD,listen_fd_init,&ev) < 0)
     {
         printf("[%s %d] Epoll ctl error!\n",__FUNCTION__,__LINE__);
         return 0;
     }
+} 
 
+
+void epoll_loop()
+{
+    int res,i,accept_fd,event_num;
     char szRecvBuf[MAX_BUFSIZE];
     memset(szRecvBuf,0x0,MAX_BUFSIZE); 
-
-    for (;;)    
+	while(1)
     {   
-        nEventNum = epoll_wait(nEpollfd, events, MAX_EVENT, -1);
-        printf("events num:%d\n",nEventNum);
-        for ( i = 0;  i<nEventNum; i++ )
+        event_num = epoll_wait(epoll_fd, events, MAX_EVENT, -1);
+        for ( i = 0;  i<event_num; i++ )
         {   
 
-            if ((events[i].events & EPOLLERR) ||  
-                    (events[i].events & EPOLLHUP))  
+            if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP))  
             {  
                 printf("[%s %d] Epoll Event Error!\n",__FUNCTION__,__LINE__);
                 close (events[i].data.fd);  
                 continue;  
             }
-            else if (nListenfd == events[i].data.fd)  
+            else if (listen_fd_init == events[i].data.fd)  
             {
-                printf("[%d] Listenfd:%d,events[i].data.fd:%d\n", __LINE__,nListenfd,events[i].data.fd);
-
-                nAcceptfd = accept(nListenfd, (struct sockaddr*)&clientaddr, &clilen);
-                if(nAcceptfd < 0)
+                printf("[%d] Listenfd:%d,events[i].data.fd:%d\n", __LINE__,listen_fd_init,events[i].data.fd);
+                accept_fd = accept(listen_fd_init, (struct sockaddr*)&clientaddr, &clilen);
+                if(accept_fd < 0)
                 {
-                    printf("[%s %d] Accept fd fail return:%d!\n",__FUNCTION__,__LINE__,nAcceptfd);
+                    printf("[%s %d] Accept fd fail return:%d!\n",__FUNCTION__,__LINE__,accept_fd);
                     continue;
                 }
-
-                printf("[%d] Acceptfd:%d,IP:%s,Port:%d\n",__LINE__,nAcceptfd,inet_ntoa(clientaddr.sin_addr),ntohs(clientaddr.sin_port));
-                if (setNonBlocking(nAcceptfd) < 0)
+                printf("[%d] Acceptfd:%d,IP:%s,Port:%d\n",__LINE__,accept_fd,inet_ntoa(clientaddr.sin_addr),ntohs(clientaddr.sin_port));
+                if (set_nonblocking(accept_fd) < 0)
                 {
                     continue;
                 }
 
-                ev.data.fd = nAcceptfd;
+                ev.data.fd = accept_fd;
                 ev.events = EPOLLIN | EPOLLET ;
-                if(epoll_ctl(nEpollfd, EPOLL_CTL_ADD, nAcceptfd, &ev)< 0)
+                if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, accept_fd, &ev)< 0)
                 {
                     printf("[%s %d] Epoll ctl error!\n",__FUNCTION__,__LINE__);
                     continue;
                 }
-
                 continue;
             }
 
             if(events[i].events&EPOLLIN)                   
             {   
-                if ((nSockfd = events[i].data.fd) < 0)
+				printf("[%s %d] EPOLLIN Sockfd:%d\n", __FUNCTION__, __LINE__, socket_fd);
+                if ((socket_fd = events[i].data.fd) < 0)
                 {
                     continue;
                 }
-
-                printf("[%s %d] EPOLLIN Sockfd:%d\n",__FUNCTION__,__LINE__,nSockfd);
-
                 memset(szRecvBuf, 0x00, sizeof(szRecvBuf));
-                if ( (nRet = recv(nSockfd, szRecvBuf, MAX_BUFSIZE,0)) < 0)   
+                if ( (res = recv(socket_fd, szRecvBuf, MAX_BUFSIZE,0)) < 0)   
                 {  
-                    printf("[%s %d] Recv Data nRet:%d, error:%s!\n",__FUNCTION__,__LINE__,nRet,strerror(errno));
                     if (errno == ECONNRESET)
                     {
-                        close(nSockfd);  
-                        epoll_ctl(nEpollfd,EPOLL_CTL_DEL,nSockfd,&ev);  
+                        close(socket_fd);  
+                        epoll_ctl(epoll_fd,EPOLL_CTL_DEL,socket_fd,&ev);  
                         events[i].data.fd = -1;
                     }
-
                     continue;
                 } 
-                else if (nRet == 0)   
+                else if (res == 0)   
                 {   
                     printf("[%s %d] Recv error, client had closed!\n",__FUNCTION__,__LINE__);
-                    close(nSockfd);  
-                    epoll_ctl(nEpollfd,EPOLL_CTL_DEL,nSockfd,&ev);  
+                    close(socket_fd);  
+                    epoll_ctl(epoll_fd,EPOLL_CTL_DEL,socket_fd,&ev);  
                     events[i].data.fd = -1;
                     continue;
-                } 
-
-                printf("\n******************************\n");
-                printf("**RecvData:%s\n",szRecvBuf);
-                printf("******************************\n");
-
-                ev.data.fd = nSockfd;            
-                ev.events = EPOLLOUT | EPOLLET;
-                epoll_ctl(nEpollfd, EPOLL_CTL_MOD, nSockfd, &ev);
+                }
+				printf("[%s %d] Recv Data res:%d\n",__FUNCTION__,__LINE__,res);
+				/* Condition  */
             }
             else if(events[i].events&EPOLLOUT)                 
             {    
-                if ((nSockfd = events[i].data.fd) < 0)
-                {
+				printf("[%s %d] EPOLLOUT Sockfd:%d\n", __FUNCTION__, __LINE__, socket_fd);
+                if ((socket_fd = events[i].data.fd) < 0)
                     continue;
-                }
-
-                printf("[%s %d] EPOLLOUT Sockfd:%d\n", __FUNCTION__, __LINE__, nSockfd);
-
-                nRet = send(nSockfd, szRecvBuf, strlen(szRecvBuf), 0);
-                printf("[%s %d] Send Len:%d\n", __FUNCTION__, __LINE__, nRet);
-
-                ev.data.fd = nSockfd;
-                ev.events = EPOLLIN | EPOLLET;
-                epoll_ctl(nEpollfd, EPOLL_CTL_MOD, nSockfd, &ev);
+                res = send(socket_fd, szRecvBuf, strlen(szRecvBuf), 0);
             }   
         }   
     }  
-
-    close(nListenfd);
+    close(listen_fd_init);
 }
+
+#if 0
+printf("[%s %d] EPOLLOUT Sockfd:%d\n", __FUNCTION__, __LINE__, socket_fd);
+#endif
