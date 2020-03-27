@@ -9,14 +9,20 @@ int epoll_fd;
 int socket_fd;
 struct epoll_event ev;
 struct epoll_event events[MAX_EVENT];
-
+unsigned int G_ID;
 
 static struct keep_alive * keep_alive_buffer_send;
 static struct keep_alive * keep_alive_buffer_recv;
 static int keep_alive_buffer_len;
+static struct keep_alive_confirm * keep_alive_confirm_buffer_send;
+static struct keep_alive_confirm * keep_alive_confirm_buffer_recv;
+static int keep_alive_confirm_buffer_len;
 static void epoll_loop();
 static int do_send(int fd);
 static int do_recv(int fd);
+static void * timer_msg(void);
+static void * timer_keep_alive(void);
+static void * link_main(void);
 
 int main(void)
 {
@@ -24,18 +30,27 @@ int main(void)
 	keep_alive_buffer_send = (struct keep_alive *)malloc(sizeof(struct keep_alive));
 	keep_alive_buffer_recv = (struct keep_alive *)malloc(sizeof(struct keep_alive));
 	keep_alive_buffer_len = sizeof(struct keep_alive);
+    keep_alive_confirm_buffer_send = (struct keep_alive_confirm *)malloc(sizeof(struct keep_alive_confirm));
+	keep_alive_confirm_buffer_recv = (struct keep_alive_confirm *)malloc(sizeof(struct keep_alive_confirm));
+	keep_alive_confirm_buffer_len = sizeof(struct keep_alive_confirm);
 
 	int ret=0;
-	pthread_t tcp_tid,timer_tid;
+	pthread_t tcp_tid,timer_tid,timer_message_tid;
 	ret = pthread_create(&tcp_tid,NULL,(void *)link_main,NULL);
 	if(ret){
 		printf("Create error\n");exit(0);
 	}
-	ret = pthread_create(&timer_tid,NULL,(void *)timer_main,NULL);
+	ret = pthread_create(&timer_tid,NULL,(void *)timer_keep_alive,NULL);
+	if(ret){
+		printf("Create error\n");exit(0);
+	}
+	ret = pthread_create(&timer_message_tid,NULL,(void *)timer_msg,NULL);
 	if(ret){
 		printf("Create error\n");exit(0);
 	}
 	pthread_join(timer_tid,NULL);
+	pthread_join(tcp_tid,NULL);
+	pthread_join(timer_message_tid,NULL);
 	return 0;
 }
 
@@ -60,12 +75,24 @@ int set_nonblocking(int * p_nsock)
     return 0;
 }
 
-void * timer_main(void)
+void * timer_msg(void)
+{
+	while(1)
+	{	
+		sleep_ms(MSG_SEND_FREQ);
+		set_epoll_status(epoll_fd,ev,socket_fd,EPOLLOUT);
+		FSM = FSM_MESSAGE;
+	}
+}
+
+
+void * timer_keep_alive(void)
 {
 	while(1)
 	{
-		sleep(5);
+		sleep_ms(KEEP_ALIVE_FREQ);
 		set_epoll_status(epoll_fd,ev,socket_fd,EPOLLOUT);
+		FSM = FSM_KEEP_ALIVE;
 	}
 }
 
@@ -120,6 +147,7 @@ void * link_main(void)
 
 void epoll_loop()
 {
+	FSM = FSM_KEEP_ALIVE;
     int event_num,send_num,recv_num,i;
 	while(1)
     {
@@ -160,14 +188,36 @@ int do_send(int fd)
 	int res =0;
 	switch(FSM)
 	{
-		case KEEP_ALIVE:
+		case FSM_KEEP_ALIVE:
 		{
+			printf("[%s %d] Send Keep Alive Packge...\n",__FUNCTION__,__LINE__);
 			get_keep_alive_data(keep_alive_buffer_send,keep_alive_buffer_len);
 			res = send(fd,keep_alive_buffer_send,keep_alive_buffer_len,0);
-			printf("[%s %d] Send %d bytes Done.\n",__FUNCTION__,__LINE__,res);
 			set_epoll_status(epoll_fd,ev,fd,EPOLLIN);
+			FSM = FSM_IDLE;
 			break;
 		}
+		case FSM_MESSAGE:
+		{
+			printf("[%s %d] Send [ID=%d]Message Packge...\n",__FUNCTION__,__LINE__,G_ID);
+			get_message_data(keep_alive_buffer_send,keep_alive_buffer_len);
+			res = send(fd,keep_alive_buffer_send,keep_alive_buffer_len,0);
+			set_epoll_status(epoll_fd,ev,fd,EPOLLIN);
+			FSM = FSM_IDLE;
+			G_ID++;
+			break;
+		}
+		case FSM_IDLE:
+		{
+			/* Do nothing */
+			break;
+		}
+		default:
+		{
+			/* Do nothing */
+			break;
+		}
+
 	}
 	return res;
 }
@@ -175,8 +225,19 @@ int do_send(int fd)
 int do_recv(int fd)
 {
 	int res = 0;
-	res = recv(socket_fd,keep_alive_buffer_recv,keep_alive_buffer_len,0);
-	printf("[%s %d] Debug Recv %d Data\n",__FUNCTION__,__LINE__,res);
+	int id;
+	res = recv(socket_fd,keep_alive_confirm_buffer_recv,keep_alive_confirm_buffer_len,0);
+	if (keep_alive_confirm_buffer_recv->msg_type == 0x1)
+	{
+		printf("[%s %d] KeepAlice Response.\n",__FUNCTION__,__LINE__);
+	}else if(keep_alive_confirm_buffer_recv->msg_type == 0x3)
+	{
+		/* code */
+		memcpy(&id,keep_alive_confirm_buffer_recv->id,4);
+		printf("[%s %d] Message[%d] Response.\n",__FUNCTION__,__LINE__,id);
+		/* Reconnect Setting */
+	}
+	
 }
 
 #if 0

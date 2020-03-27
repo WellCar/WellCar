@@ -17,16 +17,17 @@ endif
 
 CC	:=${CROSS_COMPILE}gcc
 
-objs	:=cli.o crc.o common.o
+objs_app	:=cli.o crc.o common.o 
+objs_ser	:=ser.o crc.o common.o 
 OBJS	:=-lpthread
 
 all: app  ser
 
-ser:ser.o
+ser:$(objs_ser)
 	${CC} -o ser $^ ${OBJS}
 	
 
-app: $(objs)
+app: $(objs_app)
 	${CC} -o app $^ ${OBJS}
 
 %.o: %.c

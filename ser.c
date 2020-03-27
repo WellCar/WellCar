@@ -1,5 +1,10 @@
 #include "config.h"
 #include "common.h"
+#include "ser.h"
+
+
+
+unsigned int G_ID;
 
 int epoll_fd;
 int socket_fd;
@@ -9,16 +14,68 @@ struct sockaddr_in clientaddr,serveraddr;
 struct epoll_event ev;
 struct epoll_event events[MAX_EVENT];
 
+static struct keep_alive * keep_alive_buffer_send;
+static struct keep_alive * keep_alive_buffer_recv;
+static int keep_alive_buffer_len;
+static struct keep_alive_confirm * keep_alive_confirm_buffer_send;
+static struct keep_alive_confirm * keep_alive_confirm_buffer_recv;
+static int keep_alive_confirm_buffer_len;
 static int tcp_init();
 static int add_init_epoll();
 static void epoll_loop();
+static int add_timer_pthread(pthread_t * tid);
+static int add_server_pthread(pthread_t * tid);
+static void * ser_main(void);
+
+static void recv_msg_handle();
+
+int add_timer_pthread(pthread_t * tid)
+{
+	int ret = pthread_create(tid,NULL,(void*)timer_main,NULL);
+    if (ret)
+    {
+        printf("[%s %d] Create pthread failed\n",__FUNCTION__, __LINE__);
+        return 0;
+    }
+    return 1;
+}
+
+int add_server_pthread(pthread_t * tid)
+{
+	int ret = pthread_create(tid,NULL,(void*)ser_main,NULL);
+    if (ret)
+    {
+        printf("[%s %d] Create pthread failed\n",__FUNCTION__,__LINE__);
+        return 0;
+    }
+    return 1;
+}
 
 int main()
+{
+	pthread_t timer_tid,ser_tid;
+	add_timer_pthread(&timer_tid);
+	add_server_pthread(&ser_tid);
+    pthread_join(timer_tid,NULL);
+    pthread_join(ser_tid,NULL);
+}
+
+void * timer_main(void)
+{
+    while(1)
+    {
+        sleep_ms(100);
+
+    }
+}
+
+void * ser_main(void)
 {
 	tcp_init();
 	add_init_epoll();
 	epoll_loop();
 }
+
 
 int set_nonblocking(int p_nsock)
 {   
@@ -42,6 +99,14 @@ int set_nonblocking(int p_nsock)
 
 int tcp_init()
 {
+
+	keep_alive_buffer_send = (struct keep_alive *)malloc(sizeof(struct keep_alive));
+	keep_alive_buffer_recv = (struct keep_alive *)malloc(sizeof(struct keep_alive));
+	keep_alive_buffer_len = sizeof(struct keep_alive);
+    keep_alive_confirm_buffer_send = (struct keep_alive_confirm *)malloc(sizeof(struct keep_alive_confirm));
+	keep_alive_confirm_buffer_recv = (struct keep_alive_confirm *)malloc(sizeof(struct keep_alive_confirm));
+	keep_alive_confirm_buffer_len = sizeof(struct keep_alive_confirm);
+
     clilen = sizeof(struct sockaddr_in);
     epoll_fd=epoll_create(MAX_EVENT);
     if (epoll_fd <= 0)
@@ -91,10 +156,10 @@ int add_init_epoll()
 void epoll_loop()
 {
     int res,i,accept_fd,event_num;
-    char szRecvBuf[MAX_BUFSIZE];
-    memset(szRecvBuf,0x0,MAX_BUFSIZE); 
 	while(1)
     {   
+        // memset(keep_alive_buffer_send,0,keep_alive_buffer_len);
+        // memset(keep_alive_buffer_recv,0,keep_alive_buffer_len);
         event_num = epoll_wait(epoll_fd, events, MAX_EVENT, -1);
         for ( i = 0;  i<event_num; i++ )
         {   
@@ -132,13 +197,12 @@ void epoll_loop()
 
             if(events[i].events&EPOLLIN)                   
             {   
-				printf("[%s %d] EPOLLIN Sockfd:%d\n", __FUNCTION__, __LINE__, socket_fd);
                 if ((socket_fd = events[i].data.fd) < 0)
                 {
                     continue;
                 }
-                memset(szRecvBuf, 0x00, sizeof(szRecvBuf));
-                if ( (res = recv(socket_fd, szRecvBuf, MAX_BUFSIZE,0)) < 0)   
+                memset(keep_alive_buffer_recv, 0x00, keep_alive_buffer_len);
+                if ( (res = recv(socket_fd, keep_alive_buffer_recv, keep_alive_buffer_len,0)) < 0)   
                 {  
                     if (errno == ECONNRESET)
                     {
@@ -156,19 +220,66 @@ void epoll_loop()
                     events[i].data.fd = -1;
                     continue;
                 }
-				printf("[%s %d] Recv Data res:%d\n",__FUNCTION__,__LINE__,res);
+				printf("[%s %d] Recv %d bytes Data,Do data deal\n",__FUNCTION__,__LINE__,res);
 				/* Condition  */
+                recv_msg_handle();
             }
             else if(events[i].events&EPOLLOUT)                 
             {    
-				printf("[%s %d] EPOLLOUT Sockfd:%d\n", __FUNCTION__, __LINE__, socket_fd);
                 if ((socket_fd = events[i].data.fd) < 0)
                     continue;
-                res = send(socket_fd, szRecvBuf, strlen(szRecvBuf), 0);
+                switch (MSG_TYPE)
+                {
+                    case MSG_KEEP_ALIVE:
+                    {
+                        printf("[%s %d] Keep Alive Package Pesponse.\n", __FUNCTION__, __LINE__);
+                        res = send(socket_fd, keep_alive_confirm_buffer_send, keep_alive_buffer_len, 0);
+                        set_epoll_status(epoll_fd,ev,socket_fd,EPOLLIN);
+                        break;
+                    }
+                    case MSG_MESSAGE:
+                    {
+                        printf("[%s %d] Message Package Pesponse.\n", __FUNCTION__, __LINE__);
+                        res = send(socket_fd, keep_alive_buffer_recv, keep_alive_buffer_len, 0);
+                        set_epoll_status(epoll_fd,ev,socket_fd,EPOLLIN);
+                        break;
+                    }
+                    default:
+                        break;
+                }
             }   
         }   
     }  
     close(listen_fd_init);
+}
+
+void recv_msg_handle()
+{
+    byte *  tmp = (byte *)keep_alive_buffer_recv;
+    /* This is Keep alive msg */
+    if (keep_alive_buffer_recv->msg_type == 0x3)
+    {
+        printf("[%s %d] Keep Alive Package...\n", __FUNCTION__, __LINE__);
+        /* Do Keep Alive Response */
+        get_keep_alive_data_confirm(keep_alive_confirm_buffer_send,keep_alive_buffer_recv,keep_alive_confirm_buffer_len);
+        set_epoll_status(epoll_fd,ev,socket_fd,EPOLLOUT);
+        MSG_TYPE = MSG_KEEP_ALIVE;
+    }
+    else if (keep_alive_buffer_recv->msg_type == 0x1)
+    {
+        printf("[%s %d] Message Package...\n", __FUNCTION__, __LINE__);
+        /* InterFace */
+        get_keep_alive_data(keep_alive_buffer_recv,keep_alive_buffer_len);
+        set_epoll_status(epoll_fd,ev,socket_fd,EPOLLOUT);
+        MSG_TYPE = MSG_MESSAGE;
+    }
+    /*
+    for(int i=0; i<keep_alive_buffer_len; i++)
+    {
+        printf("%X ",*tmp++);
+    }
+    printf("\n");
+    */
 }
 
 #if 0
